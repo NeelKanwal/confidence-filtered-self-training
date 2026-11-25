@@ -1,23 +1,41 @@
 # Breast MRI lesion segmentation with confidence-filtered self-training
 
-A four-channel breast DCE-MRI workflow for preparing examinations, training a source nnU-Net, adapting it with fixed binary pseudo-labels, and combining three hospital models at inference. The preprocessing modules are adapted from the study scripts. The training and inference entry points are a reference implementation for running the method with your own data and weights.
+**arXiv preprint:** link pending. <!-- Replace “link pending” with the arXiv URL when available. -->
 
-[![Figure 1. Breast DCE-MRI preparation, prediction and post-processing.](docs/Figure_1.png)](docs/Figure_1.pdf)
+## Abstract
 
-*Figure 1. Breast DCE-MRI lesion segmentation at inference. Panel A shows image preparation, model predictions and mean-logit fusion. Panel B follows the fused prediction through thresholding and post-processing to the lesion overlay on the native MRI grid.*
+Deep learning (DL) models for lesion segmentation in breast dynamic contrast-enhanced magnetic resonance imaging (DCE-MRI) are typically developed on curated multi-centre data and can lose accuracy when applied at hospitals whose scanners and protocols differ from those represented in the training data. Motion and differences in image quality complicate transfer, while obtaining expert annotations for local retraining is time-consuming. We develop a preprocessing pipeline and propose an unsupervised domain adaptation method based on confidence-filtered self-training. First, we use a multi-step preprocessing pipeline to correct intensity inhomogeneity, co-register DCE-MRI sequences, standardize voxel spacing, and normalize image intensity. Next, we use an nnU-Net pretrained on the public MAMA-MIA dataset for binary lesion segmentation. We apply it to unlabelled DCE-MRI examinations from two hospitals and threshold the predicted lesion probabilities to generate binary pseudo-labels. Finally, we use these binary pseudo-labels to fine-tune three models, two trained separately on data from the respective hospitals and a third trained on pooled data from both. We combine their predictions by mean-logit fusion. We retain the source architecture and normalization and evaluate segmentation against expert lesion masks. In high-motion examinations, mean Dice was 43.2% higher after combined registration, resampling, and normalization. The self-trained ensemble achieved a mean Dice of 0.4382 compared with 0.3637 for the source baseline and improved overlap in 18 of 20 examinations. The proposed method enables local fine-tuning without new expert training annotations, with effects that vary by hospital.
+
+[![Breast MRI lesion segmentation workflow](docs/Figure_1.png)](docs/Figure_1.pdf)
+
+*Figure 1. Breast MRI lesion segmentation at inference.*
+
+## Where to start
+
+| What you have | Where to go after installation |
+|---|---|
+| DICOM series or four selected NIfTI phases | [Prepare the four channels](#1-prepare-four-dce-channels) |
+| Labelled examinations for training a source model | [Pretrain the source model](#2-pretrain-the-source-model) |
+| A trained source model and unlabelled examinations | [Self-train the hospital models](#3-self-train-m1-m2-and-m3) |
+| Prepared images and compatible trained weights | [Run single-model inference](#single-model-example) or [run the ensemble](#three-model-ensemble) |
 
 ## Installation
 
-Use Linux and Python 3.12. Install the file utility and the dcm2niix executable if starting from DICOM. DCMTK supplies the optional dcmdump executable used to read series descriptions. Activate a Python environment with a PyTorch build supported by your GPU driver. Python dependency versions are pinned in requirements.txt.
+1. Clone the repository and enter its root directory.
+   ~~~bash
+   git clone https://github.com/NeelKanwal/confidence-filtered-self-training.git
+   cd confidence-filtered-self-training
+   ~~~
+2. On Linux, create a Python 3.12 environment and install the pinned dependencies. If you plan to use a GPU, use a PyTorch build compatible with your driver.
+   ~~~bash
+   python3.12 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install -r requirements.txt
+   python -c "import ants, nibabel, SimpleITK, torch; print(torch.__version__, torch.cuda.is_available())"
+   ~~~
+3. For DICOM input, install the system utilities `file` and `dcm2niix`. The optional `dcmdump` utility from DCMTK reads series descriptions. Work with de-identified copies because conversion uses DICOM fields in filenames.
 
-~~~bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -c "import ants, nibabel, SimpleITK, torch; print(torch.__version__, torch.cuda.is_available())"
-~~~
-
-Run all commands from the repository root. Edit paths and settings directly near the top of each entry point. Local working files go under `work/`. Model files, raw medical images, sidecars, logs and generated case previews are excluded from version control. Use de-identified copies in a local workspace. The conversion step derives filenames from DICOM fields and is not a de-identification tool.
+Run the scripts from the repository root. The default working directory is `work/`. To use another drive, edit `WORK` in [study.py](study.py), for example `WORK = Path("/data/breast_mri")`. The modelling scripts use this setting. [preprocess.py](preprocess.py) has its own input and output paths.
 
 ## 1. Prepare four DCE channels
 
@@ -63,24 +81,59 @@ The entry point writes dataset.json, checks dataset integrity, plans the full-re
 
 ## 3. Self-train M1, M2 and M3
 
-For each model, place prepared four-channel examinations in work/adaptation/M1/train/ and work/adaptation/M1/validation/. Supply their binary breast masks in work/adaptation/M1/roi/ as example_mask.nii.gz. Use the same layout for M2 and M3. Assign M1 the first site's training and validation subsets, M2 the second site's, and M3 the pooled subsets. Preserve patient-level separation among training, validation and evaluation, including when pooling sites.
+1. For each model, place prepared four-channel examinations in work/adaptation/M1/train/ and work/adaptation/M1/validation/.
+2. Supply their binary breast masks in work/adaptation/M1/roi/ as example_mask.nii.gz. Use the same layout for M2 and M3.
+3. Assign M1 the first site's training and validation subsets, M2 the second site's, and M3 the pooled subsets. Preserve patient-level separation among training, validation and evaluation, including when pooling sites.
 
 ~~~bash
 python self_train.py
 ~~~
 
-Set MODEL_NAME in self_train.py and run once per model. Each run starts from the same configured source weights. It generates fixed binary targets from lesion probabilities of at least 0.70 within the breast ROI after two iterations of dilation. No expert evaluation mask is used in this step. The source nnU-Net preprocessor transforms channels and pseudo-labels together. The adaptation loop samples one training patch per examination per epoch and uses fixed central patches for validation. The source plan determines the patch shape. This implementation uses AdamW, a five-epoch warm-up to 1e-5, cosine decay and early stopping. Record the seed and training membership for each run. The selected weights and plans are saved locally in work/models/M1, M2 or M3. Each output directory must be new.
+Set `MODEL_NAME` in `self_train.py` before each run. Each run starts from the same configured source weights. It generates fixed binary targets from lesion probabilities of at least 0.70 within the breast ROI after two iterations of dilation. No expert evaluation mask is used in this step.
+
+The source nnU-Net preprocessor transforms channels and pseudo-labels together. The adaptation loop samples one training patch per examination per epoch and uses fixed central patches for validation. The source plan determines the patch shape. This implementation uses AdamW, a five-epoch warm-up to 1e-5, cosine decay and early stopping. Record the seed and training membership for each run.
+
+The selected weights and plans are saved locally in work/models/M1, M2 or M3. Each output directory must be new.
 
 ## 4. Predict with one model or the ensemble
 
-~~~bash
-python inference.py
-python ensemble.py
-~~~
+### Single-model example
 
-For single-model inference, set INPUT, MODEL, FOLD, WEIGHTS and OUTPUT in inference.py. INPUT contains four channels per examination. The default predicts with the source baseline. Each output is a 3D lesion probability image on the prepared input grid. To evaluate an adapted model, select its local model directory and fold 0.
+1. Supply your own trained two-class nnU-Net model using SimpleITKIO. The example below uses M1 and one fictional examination. Place the four **prepared** images and the model files under the working directory as shown. Channel 0000 is pre-contrast, followed by three post-contrast phases in time order.
 
-For ensemble inference, ensemble.py loads the three local model directories and predicts on the same examinations. Under work/evaluation/, supply images/ with the four prepared channels, roi/example_mask.nii.gz on the prepared grid, and native/example.nii.gz as the original fourth-phase reference. Native and prepared images must share the physical coordinate system. The code averages voxel-wise lesion log-odds with equal weights, converts back to probability and thresholds at 0.50. It keeps six-connected components with at least 1% overlap with the dilated ROI and volume of at least 8 mm³. It maps the mask to native space with nearest-neighbour interpolation and reapplies the volume cutoff. Outputs are a probability image on the prepared grid and a binary mask on the native reference grid.
+   ~~~text
+   work/
+   ├── evaluation/images/
+   │   ├── example_0000.nii.gz
+   │   ├── example_0001.nii.gz
+   │   ├── example_0002.nii.gz
+   │   └── example_0003.nii.gz
+   └── models/M1/
+       ├── dataset.json
+       ├── plans.json
+       └── fold_0/checkpoint_best.pth
+   ~~~
+
+2. Edit the settings at the top of [inference.py](inference.py). Point `MODEL` to the directory containing the two JSON files. The script uses `FOLD` and `WEIGHTS` to locate the weights inside it.
+
+   ~~~python
+   INPUT = WORK / "evaluation" / "images"
+   MODEL = WORK / "models" / "M1"
+   FOLD = 0
+   WEIGHTS = "checkpoint_best.pth"
+   OUTPUT = WORK / "probabilities" / "M1"
+   ~~~
+
+3. Run `python inference.py`. Open `work/probabilities/M1/example.nii.gz` to view the lesion probability at each voxel on the prepared image grid. For source-baseline inference, use the original defaults in `inference.py` and set the source model location in `study.py`.
+
+### Three-model ensemble
+
+1. Use the same four prepared images. Place all three model directories under `work/models/` as `M1/`, `M2/` and `M3/`, each with the model layout shown above.
+2. Add the binary breast ROI at `work/evaluation/roi/example_mask.nii.gz` on the prepared image grid. Place the original fourth-phase volume at `work/evaluation/native/example.nii.gz`. The native and prepared volumes must share a physical coordinate system.
+3. Run `python ensemble.py`. If your folders differ, edit `INPUT`, `ROI`, `NATIVE`, `MODEL_DIRS` and `OUTPUT` in [ensemble.py](ensemble.py).
+4. Open the outputs in `work/ensemble/`. The file `example_prob.nii.gz` contains fused lesion probabilities on the prepared grid. Overlay `example_mask.nii.gz` on the native fourth-phase volume to inspect the binary segmentation.
+
+The ensemble averages lesion log-odds across models with equal weights and thresholds the fused probability at 0.50. It retains six-connected components of at least 8 mm³ with at least 1% overlap with the dilated breast ROI. After mapping the mask to the native grid with nearest-neighbour interpolation, it reapplies the volume cutoff.
 
 ## Results reported in the manuscript
 
