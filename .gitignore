@@ -1,0 +1,10 @@
+*
+!/.gitignore
+!/README.md
+!/requirements.txt
+!/*.py
+!/preprocessing/
+!/preprocessing/*.py
+!/docs/
+!/docs/Figure_1.pdf
+!/docs/Figure_1.png
